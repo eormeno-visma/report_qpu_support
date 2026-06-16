@@ -34,7 +34,7 @@ from typing import Any
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 
-from config.queries import COMPANIES_QUERY, IA_FEATURES_QUERY
+from config.queries import COMPANIES_QUERY
 from db.connections import MySQLMainConnection, MySQLLogsConnection, MongoConnection
 from db.executors import MySQLQueryExecutor, MongoQueryExecutor
 from services.connection_tester import ConnectionTester
@@ -1152,40 +1152,6 @@ def _execute_step2_chunked(
 
 
 # ---------------------------------------------------------------------------
-# Features IA
-# ---------------------------------------------------------------------------
-
-def _fetch_ia_features(
-    companies: list[dict[str, Any]],
-    mysql_main_executor: MySQLQueryExecutor,
-) -> dict[str, list[str]]:
-    """Obtiene los switches IA por empresa y retorna columnas SI/NO alineadas al orden maestro.
-
-    Columnas generadas:
-      - 'Obj IA'      → switch generateObjetiveWithAI  (sección IA del superadmin)
-      - 'Feedback IA' → switch feedbackWithAI           (sección IA del superadmin)
-    """
-    results = mysql_main_executor.fetch_all(IA_FEATURES_QUERY)
-
-    ia_map: dict[int, dict[str, Any]] = {}
-    for r in results:
-        cid = r.get("empresa_id")
-        if cid is not None:
-            ia_map[int(cid)] = r
-
-    obj_ia: list[str] = []
-    feedback_ia: list[str] = []
-
-    for comp in companies:
-        cid = int(comp["empresa_id"])
-        row_data = ia_map.get(cid, {})
-        obj_ia.append("SI" if row_data.get("obj_ia") else "NO")
-        feedback_ia.append("SI" if row_data.get("feedback_ia") else "NO")
-
-    return {"Obj IA": obj_ia, "Feedback IA": feedback_ia}
-
-
-# ---------------------------------------------------------------------------
 # Contexto compartido entre opciones del menú
 # ---------------------------------------------------------------------------
 
@@ -2016,24 +1982,6 @@ def opt_execute_queries(ctx: _AppContext, select_all: bool = False) -> None:
 
         # --- Filas no ejecutables (sin query ni steps válidos) ---
         _count_skip += 1
-
-    # ── Features IA ─────────────────────────────────────────────────────
-    print(f"\n{'─'*65}")
-    print(f"📂 Sección: FEATURES IA")
-    print(f"{'─'*65}")
-    print(f"\n  🤖 Obteniendo switches IA (Obj IA / Feedback IA)...")
-    print(f"     Origen: companie_options (superadmin → sección IA)")
-    try:
-        ia_cols = _fetch_ia_features(companies, main_exec)
-        kpi_columns.update(ia_cols)
-        si_obj = sum(1 for v in ia_cols["Obj IA"] if v == "SI")
-        si_fb  = sum(1 for v in ia_cols["Feedback IA"] if v == "SI")
-        print(f"     ✅ Obj IA      : {si_obj}/{len(companies)} empresas con SI")
-        print(f"     ✅ Feedback IA : {si_fb}/{len(companies)} empresas con SI")
-    except Exception as e:
-        print(f"     ❌ Error al obtener Features IA: {e}")
-        kpi_columns["Obj IA"]      = ["NO"] * len(companies)
-        kpi_columns["Feedback IA"] = ["NO"] * len(companies)
 
     # ── Cerrar conexiones ───────────────────────────────────────────────
     mysql_main_cm.close()
