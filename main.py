@@ -499,14 +499,45 @@ def _parse_csv_logs_query(sql: str) -> tuple[list[str], list[str]]:
             messages = [msg_eq.group(1).replace('""', '"')]
 
     # Extraer userType — buscar = 'RRHH' o IN ('Jefe', 'Colaborador')
-    ut_in = re.search(r"userType['\"]?\)\s*(?:=\s*'([^']+)'|IN\s*\(([^)]+)\))", sql, re.IGNORECASE)
+    ut_in = re.search(
+        r"userType['\"]?(?:\s*\))+\s*(?:=\s*'([^']+)'|IN\s*\(([^)]+)\))",
+        sql,
+        re.IGNORECASE,
+    )
     if ut_in:
         if ut_in.group(1):
             user_types = [ut_in.group(1)]
         elif ut_in.group(2):
             user_types = re.findall(r"'([^']+)'", ut_in.group(2))
 
+    if not messages:
+        raise ValueError(
+            "No se pudieron extraer los 'message' del SQL de la fila csv-logs — "
+            f"el KPI daría 0 para todas las empresas. SQL: {sql[:300]}"
+        )
+    if "userType" in sql and not user_types:
+        raise ValueError(
+            "No se pudieron extraer los valores de 'userType' del SQL de la fila csv-logs — "
+            f"el filtro quedaría vacío y el KPI daría 0 para todas las empresas. SQL: {sql[:300]}"
+        )
+
     return messages, user_types
+
+
+def _load_superadmin_user_ids() -> set[int]:
+    try:
+        with MySQLMainConnection() as conn:
+            rows = MySQLQueryExecutor(conn).fetch_all(
+                "SELECT DISTINCT user_id FROM user_roles "
+                "WHERE is_hidden_admin = 1 AND user_id IS NOT NULL;"
+            )
+        ids = {int(r["user_id"]) for r in rows if r["user_id"] is not None}
+        print(f"        🚫 Excluyendo {len(ids):,} usuarios con superadministrador asociado")
+        return ids
+    except Exception as e:
+        raise RuntimeError(
+            f"No se pudo obtener la lista de usuarios con superadmin asociado: {e}"
+        ) from e
 
 
 def _extract_social_kpi_from_csv(
@@ -516,6 +547,7 @@ def _extract_social_kpi_from_csv(
     messages: list[str],
     user_types: list[str],
     companies: list[dict[str, Any]],
+    excluded_user_ids: set[int] | None = None,
 ) -> list[Any]:
     """
     Lee el CSV consolidado de logs en chunks y calcula un KPI social:
@@ -539,6 +571,7 @@ def _extract_social_kpi_from_csv(
     end = pd.Timestamp(fecha_fin) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
     messages_set = set(messages)
     user_types_set = set(user_types)
+    excluded_ids = excluded_user_ids or set()
 
     def _process_chunk(chunk: pd.DataFrame) -> dict[int, set[int]]:
         """Filtra un chunk y retorna {companies_id: set(userIDs)}."""
@@ -576,6 +609,10 @@ def _extract_social_kpi_from_csv(
                 cid_int = int(cid)
                 uid_int = int(u_id)
             except (ValueError, TypeError):
+                continue
+
+            # Usuarios con superadministrador asociado no cuentan como uso del cliente
+            if excluded_ids and uid_int in excluded_ids:
                 continue
 
             result.setdefault(cid_int, set()).add(uid_int)
@@ -1931,6 +1968,7 @@ def opt_execute_queries(ctx: _AppContext, select_all: bool = False) -> None:
                     messages_filter,
                     user_types_filter,
                     companies,
+                    excluded_user_ids=_load_superadmin_user_ids(),
                 )
                 kpi_columns[label] = aligned
                 print(f"     ✅ Resultado : alineado a {len(companies)} empresas")
